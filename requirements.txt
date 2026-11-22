@@ -1,0 +1,9 @@
+# Dependencias del proyecto Caballo de Troya (Windows 10 / Python 3.10+)
+opencv-contrib-python>=4.10.0.84
+numpy>=1.26.0
+pyserial>=3.5
+python-chess>=1.999
+pyttsx3>=2.90
+pygame-ce>=2.5.0
+customtkinter>=5.2.2
+Pillow>=10.4.0

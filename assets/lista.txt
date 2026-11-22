@@ -1,0 +1,55 @@
+Listado de rutas de carpetas
+\---sounds
+    +---captura
+    |       laughing-meme.mp3
+    |       lo-siento-wilson.mp3
+    |       maldicion-meme-plantilla-goku.mp3
+    |       mario-bros-lose-life.mp3
+    |       papoi.mp3
+    |       pefeto-caballero.mp3
+    |       por-fin-apareciste-malnacido-picoro.mp3
+    |       preview_4.mp3
+    |       reprobado.mp3
+    |       x-files-theme-song.mp3
+    |       ya-basta-freezer.mp3
+    |       
+    +---demora
+    |       3-doritos-despues.mp3
+    |       30-Second-Timer-With-Jeopardy-Thinking-Music.mp3
+    |       crickets-chirping.mp3
+    |       date-prisa-goku.mp3
+    |       ehhh-diego-maradona.mp3
+    |       estoy-cansado-jefe.mp3
+    |       we-will-rock-you.mp3
+    |       
+    +---inicio
+    |       aura-2.mp3
+    |       heavenly-music-gaming-sound-effect-hd-mp3cut.mp3
+    |       la-12-trompetas.mp3
+    |       que-es-eso-bob-esponja.mp3
+    |       se-viene-boca.mp3
+    |       
+    +---jaque
+    |       aguanta-aguantaaaaa.mp3
+    |       aplausos-1_GrqkPux.mp3
+    |       drip-goku-meme-song-original-dragon-ball-super-music-clash-of-gods-in-description.mp3
+    |       gol-messi.mp3
+    |       mariano-closs-ahi-estaaaaa-gooool.mp3
+    |       michael-jackson-evil-laugh.mp3
+    |       Run-Efecto-de-Sonido.mp3
+    |       serepudrio.mp3
+    |       tengo-miedo-en-este-momento_01.mp3
+    |       yo-soy-inevitable.mp3
+    |       zoeira-alerta-de-metal-gear.mp3
+    |       
+    \---victoria
+            el-senor-de-la-noche-don-omar.mp3
+            es-hoy-es-hoy.mp3
+            fatality-mortal-kombat-sound-effect-hd.mp3
+            flawless-victory-mk-x.mp3
+            hasta-manana.mp3
+            musica-triste-despedida.mp3
+            terminator-2-hasta-la-vista-baby.mp3
+            y-se-marcho.mp3
+            yo-soy-inevitable.mp3
+            
