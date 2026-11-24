@@ -23,6 +23,7 @@ from datetime import datetime
 from tkinter import messagebox
 from typing import Any, Dict, List, Optional, Tuple
 
+import chess
 import customtkinter as ctk
 import cv2
 import numpy as np
@@ -49,6 +50,24 @@ VOICE_TEST_LABELS_ES: List[Tuple[str, str]] = [
     ("Reloj presionado", "clock_pressed"),
     ("Parada de emergencia", "emergency_stop"),
 ]
+
+UNICODE_PIECES: Dict[str, str] = {
+    "K": "♔",
+    "Q": "♕",
+    "R": "♖",
+    "B": "♗",
+    "N": "♘",
+    "P": "♙",
+    "k": "♚",
+    "q": "♛",
+    "r": "♜",
+    "b": "♝",
+    "n": "♞",
+    "p": "♟",
+}
+
+BOARD_FILES = "abcdefgh"
+BOARD_RANKS = "12345678"
 
 
 class ChessRobotApp(ctk.CTk):
@@ -85,6 +104,15 @@ class ChessRobotApp(ctk.CTk):
         self._humor_timer_var = ctk.BooleanVar(
             value=bool(self.config_manager.get("audio", "humor_timer_enabled", default=True))
         )
+        self._play_vs_ai_var = ctk.BooleanVar(value=True)
+
+        # Estado del tablero interactivo 8x8 y turno de IA
+        self._selected_square: Optional[str] = None
+        self._legal_targets: List[str] = []
+        self._last_move_squares: Optional[Tuple[str, str]] = None
+        self._ai_thinking: bool = False
+        self._board_square_px: int = 44
+        self._board_margin_px: int = 20
 
         # Estado de calibración interactiva de 4 esquinas
         self._calibrating = False
@@ -114,6 +142,7 @@ class ChessRobotApp(ctk.CTk):
         audio_cfg = self.config_manager.get("audio", default={})
         self.audio = AudioManager(
             enabled=bool(audio_cfg.get("enabled", True)),
+            use_tts=bool(audio_cfg.get("use_tts", False)),
             preferred_locale=str(audio_cfg.get("preferred_locale", "es-AR")),
             rate=int(audio_cfg.get("rate", 175)),
             volume=float(audio_cfg.get("volume", 1.0)),
@@ -398,39 +427,39 @@ class ChessRobotApp(ctk.CTk):
 
         # Cruceta X/Y
         xy_grid = ctk.CTkFrame(pad_frame, fg_color="transparent")
-        xy_grid.pack(side="left", padx=(0, 14))
-        ctk.CTkButton(xy_grid, text="Y+", width=68, command=lambda: self._jog(0, 1, 0)).grid(
-            row=0, column=1, padx=3, pady=3
+        xy_grid.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(xy_grid, text="Y+", width=64, command=lambda: self._jog(0, 1, 0)).grid(
+            row=0, column=1, padx=2, pady=3
         )
-        ctk.CTkButton(xy_grid, text="X-", width=68, command=lambda: self._jog(-1, 0, 0)).grid(
-            row=1, column=0, padx=3, pady=3
+        ctk.CTkButton(xy_grid, text="X-", width=64, command=lambda: self._jog(-1, 0, 0)).grid(
+            row=1, column=0, padx=2, pady=3
         )
         ctk.CTkButton(
             xy_grid,
             text="Espera",
-            width=68,
+            width=64,
             fg_color="#475569",
             command=self._on_go_standby,
-        ).grid(row=1, column=1, padx=3, pady=3)
-        ctk.CTkButton(xy_grid, text="X+", width=68, command=lambda: self._jog(1, 0, 0)).grid(
-            row=1, column=2, padx=3, pady=3
+        ).grid(row=1, column=1, padx=2, pady=3)
+        ctk.CTkButton(xy_grid, text="X+", width=64, command=lambda: self._jog(1, 0, 0)).grid(
+            row=1, column=2, padx=2, pady=3
         )
-        ctk.CTkButton(xy_grid, text="Y-", width=68, command=lambda: self._jog(0, -1, 0)).grid(
-            row=2, column=1, padx=3, pady=3
+        ctk.CTkButton(xy_grid, text="Y-", width=64, command=lambda: self._jog(0, -1, 0)).grid(
+            row=2, column=1, padx=2, pady=3
         )
 
-        # Columna Z
+        # Columna Z (etiquetas concisas para evitar recorte en cualquier escala DPI)
         z_col = ctk.CTkFrame(pad_frame, fg_color="transparent")
-        z_col.pack(side="left", padx=6)
+        z_col.pack(side="left", fill="x", expand=True, padx=(4, 0))
         ctk.CTkButton(
-            z_col, text="Z+ (Subir)", width=110, fg_color="#0f766e", command=lambda: self._jog(0, 0, 1)
-        ).pack(pady=3)
+            z_col, text="Z+ Subir", width=116, fg_color="#0f766e", command=lambda: self._jog(0, 0, 1)
+        ).pack(fill="x", pady=3)
         ctk.CTkButton(
-            z_col, text="Ir a Z Seguro", width=110, fg_color="#475569", command=self._on_go_safe_z
-        ).pack(pady=3)
+            z_col, text="Z Seguro", width=116, fg_color="#475569", command=self._on_go_safe_z
+        ).pack(fill="x", pady=3)
         ctk.CTkButton(
-            z_col, text="Z- (Bajar)", width=110, fg_color="#0f766e", command=lambda: self._jog(0, 0, -1)
-        ).pack(pady=3)
+            z_col, text="Z- Bajar", width=116, fg_color="#0f766e", command=lambda: self._jog(0, 0, -1)
+        ).pack(fill="x", pady=3)
 
         # ---- 2. Prueba de Movimiento Simultáneo (G0 X Y Z) ----
         sim_card = ctk.CTkFrame(scroll, corner_radius=8)
@@ -446,22 +475,22 @@ class ChessRobotApp(ctk.CTk):
         sim_row.pack(fill="x", padx=10, pady=(2, 8))
 
         ctk.CTkLabel(sim_row, text="X:").pack(side="left")
-        self.ent_sim_x = ctk.CTkEntry(sim_row, width=62)
+        self.ent_sim_x = ctk.CTkEntry(sim_row, width=56)
         self.ent_sim_x.insert(0, "100.0")
-        self.ent_sim_x.pack(side="left", padx=(3, 8))
+        self.ent_sim_x.pack(side="left", padx=(2, 6))
 
         ctk.CTkLabel(sim_row, text="Y:").pack(side="left")
-        self.ent_sim_y = ctk.CTkEntry(sim_row, width=62)
+        self.ent_sim_y = ctk.CTkEntry(sim_row, width=56)
         self.ent_sim_y.insert(0, "100.0")
-        self.ent_sim_y.pack(side="left", padx=(3, 8))
+        self.ent_sim_y.pack(side="left", padx=(2, 6))
 
         ctk.CTkLabel(sim_row, text="Z:").pack(side="left")
-        self.ent_sim_z = ctk.CTkEntry(sim_row, width=62)
+        self.ent_sim_z = ctk.CTkEntry(sim_row, width=56)
         self.ent_sim_z.insert(0, str(self.config_manager.get("motion", "z_safe_mm", default=45.0)))
-        self.ent_sim_z.pack(side="left", padx=(3, 8))
+        self.ent_sim_z.pack(side="left", padx=(2, 6))
 
         ctk.CTkButton(
-            sim_row, text="Mover Simultáneo", width=130, command=self._on_move_simultaneous
+            sim_row, text="Mover", width=86, command=self._on_move_simultaneous
         ).pack(side="right")
 
         # ---- 3. Control de Garra SG90 (Pin D11) ----
@@ -498,17 +527,17 @@ class ChessRobotApp(ctk.CTk):
         grip_btns_1 = ctk.CTkFrame(grip_card, fg_color="transparent")
         grip_btns_1.pack(fill="x", padx=10, pady=3)
         ctk.CTkButton(
-            grip_btns_1, text="Aplicar Slider", width=100, command=self._on_send_gripper_slider
+            grip_btns_1, text="Aplicar", command=self._on_send_gripper_slider
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
-            grip_btns_1, text="Abrir Garra", width=95, command=self._on_open_gripper
+            grip_btns_1, text="Abrir Garra", command=self._on_open_gripper
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
-            grip_btns_1, text="Cerrar Garra", width=95, command=self._on_close_gripper
+            grip_btns_1, text="Cerrar Garra", command=self._on_close_gripper
         ).pack(side="left", padx=2, expand=True, fill="x")
 
         grip_btns_2 = ctk.CTkFrame(grip_card, fg_color="transparent")
-        grip_btns_2.pack(fill="x", padx=10, pady=(2, 8))
+        grip_btns_2.pack(fill="x", padx=10, pady=2)
         ctk.CTkButton(
             grip_btns_2,
             text="Probar Garra",
@@ -521,14 +550,17 @@ class ChessRobotApp(ctk.CTk):
             fg_color="#475569",
             command=lambda: self.robot.disable_gripper_pwm(),
         ).pack(side="left", padx=2, expand=True, fill="x")
+
+        grip_btns_3 = ctk.CTkFrame(grip_card, fg_color="transparent")
+        grip_btns_3.pack(fill="x", padx=10, pady=(2, 8))
         ctk.CTkButton(
-            grip_btns_2,
+            grip_btns_3,
             text="Guardar Abierta",
             fg_color="#334155",
             command=lambda: self._save_gripper_preset("open_pwm"),
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
-            grip_btns_2,
+            grip_btns_3,
             text="Guardar Cerrada",
             fg_color="#334155",
             command=lambda: self._save_gripper_preset("close_pwm"),
@@ -556,7 +588,7 @@ class ChessRobotApp(ctk.CTk):
         clock_btns.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkButton(
             clock_btns,
-            text="Guardar Pos. Actual como Reloj",
+            text="Guardar Pos. Reloj",
             fg_color="#475569",
             command=self._on_save_clock_from_current,
         ).pack(side="left", padx=(0, 4), expand=True, fill="x")
@@ -603,13 +635,18 @@ class ChessRobotApp(ctk.CTk):
             command=self._on_apply_grbl_preset,
         ).pack(side="right")
 
-        # ---- 6. Prueba de Voz (es-AR) ----
+        # ---- 6. Prueba de Voz (TTS opcional) ----
         voice_card = ctk.CTkFrame(scroll, corner_radius=8)
         voice_card.pack(fill="x", padx=4, pady=(0, 8))
 
+        voice_title = (
+            "Síntesis de Voz Offline (Español Argentina)"
+            if self.audio.use_tts
+            else "Síntesis de Voz TTS (Desactivada — Solo Clips MP3)"
+        )
         ctk.CTkLabel(
             voice_card,
-            text="Síntesis de Voz Offline (Español Argentina)",
+            text=voice_title,
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(anchor="w", padx=10, pady=(8, 4))
 
@@ -627,7 +664,8 @@ class ChessRobotApp(ctk.CTk):
         ctk.CTkButton(
             voice_row,
             text="Probar Voz",
-            width=110,
+            width=100,
+            state="normal" if self.audio.use_tts else "disabled",
             command=self._on_test_voice,
         ).pack(side="right")
 
@@ -689,33 +727,66 @@ class ChessRobotApp(ctk.CTk):
         self.sw_humor_timer.pack(anchor="w", padx=12, pady=(2, 8))
 
     def _build_game_tab(self, parent: ctk.CTkFrame) -> None:
-        container = ctk.CTkFrame(parent, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=4, pady=4)
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
 
         self.lbl_game_status = ctk.CTkLabel(
-            container,
+            scroll,
             text="Turno de las Blancas",
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color="#1f2937",
             corner_radius=6,
             height=34,
         )
-        self.lbl_game_status.pack(fill="x", pady=(0, 8))
+        self.lbl_game_status.pack(fill="x", padx=4, pady=(2, 6))
 
-        self.txt_board_ascii = ctk.CTkTextbox(
-            container, height=205, font=ctk.CTkFont(family="Consolas", size=14)
+        # Barra superior de partida: Nueva Partida + Jugar contra IA
+        top_game_bar = ctk.CTkFrame(scroll, fg_color="transparent")
+        top_game_bar.pack(fill="x", padx=4, pady=(0, 6))
+
+        ctk.CTkButton(
+            top_game_bar,
+            text="Nueva Partida",
+            width=130,
+            fg_color="#2d7d46",
+            hover_color="#236337",
+            command=self._on_new_game,
+        ).pack(side="left", padx=(0, 8))
+
+        self.sw_play_vs_ai = ctk.CTkSwitch(
+            top_game_bar,
+            text="Jugar contra IA",
+            variable=self._play_vs_ai_var,
+            command=self._on_toggle_play_vs_ai,
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.txt_board_ascii.pack(fill="x", pady=(0, 8))
-        self.txt_board_ascii.configure(state="disabled")
+        self.sw_play_vs_ai.pack(side="left", padx=4)
 
-        move_frame = ctk.CTkFrame(container, corner_radius=8)
-        move_frame.pack(fill="x", pady=(0, 8))
+        # Tablero interactivo 8x8 clicable (piezas Unicode)
+        board_wrapper = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=8)
+        board_wrapper.pack(pady=(0, 8))
+
+        canvas_size = self._board_margin_px + 8 * self._board_square_px + 8
+        self.board_canvas = tk.Canvas(
+            board_wrapper,
+            width=canvas_size,
+            height=canvas_size,
+            bg="#111827",
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.board_canvas.pack(padx=6, pady=6)
+        self.board_canvas.bind("<Button-1>", self._on_board_click)
+
+        # Entrada manual UCI + Detección por cámara
+        move_frame = ctk.CTkFrame(scroll, corner_radius=8)
+        move_frame.pack(fill="x", padx=4, pady=(0, 6))
 
         ctk.CTkLabel(
             move_frame,
-            text="Ejecutar Jugada Manual (UCI ej: e2e4)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 4))
+            text="Jugada Manual (UCI ej: e2e4) o Visión",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(6, 4))
 
         row = ctk.CTkFrame(move_frame, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 8))
@@ -725,26 +796,19 @@ class ChessRobotApp(ctk.CTk):
 
         ctk.CTkButton(
             row,
-            text="Ejecutar en Robot",
-            width=145,
-            fg_color="#2d7d46",
-            hover_color="#236337",
+            text="Mover",
+            width=80,
+            fg_color="#1f6aa5",
             command=self._on_execute_manual_move,
-        ).pack(side="right")
+        ).pack(side="left", padx=(0, 4))
 
-        vis_btns = ctk.CTkFrame(container, fg_color="transparent")
-        vis_btns.pack(fill="x", pady=4)
         ctk.CTkButton(
-            vis_btns,
-            text="Detectar Jugada por Cámara",
+            row,
+            text="Leer Cámara",
+            width=105,
+            fg_color="#0e7490",
             command=self._on_detect_move_from_vision,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(
-            vis_btns,
-            text="Reiniciar Partida",
-            fg_color="#475569",
-            command=self._on_reset_game,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ).pack(side="right")
 
     def _build_config_tab(self, parent: ctk.CTkFrame) -> None:
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -1301,6 +1365,9 @@ class ChessRobotApp(ctk.CTk):
             messagebox.showwarning("Perfil GRBL", msg)
 
     def _on_test_voice(self) -> None:
+        if not self.audio.use_tts:
+            self._log_to_console("SYS", "TTS desactivado (modo solo clips MP3). Usá los botones de Humor y Sonidos.")
+            return
         selected = self.voice_combo.get()
         for label, key in VOICE_TEST_LABELS_ES:
             if label == selected:
@@ -1311,7 +1378,7 @@ class ChessRobotApp(ctk.CTk):
     def _on_test_humor_category(self, category: str) -> None:
         res = self.audio.play_event(category)
         if res is None:
-            self._log_to_console("ERR", f"No hay sonidos ni frases configuradas para '{category}'.")
+            self._log_to_console("ERR", f"No hay clips de audio configurados para '{category}'.")
 
     def _on_toggle_humor_timer(self) -> None:
         enabled = bool(self._humor_timer_var.get())
@@ -1320,18 +1387,33 @@ class ChessRobotApp(ctk.CTk):
         estado = "activado" if enabled else "desactivado"
         self._log_to_console("SYS", f"Temporizador de demora {estado}.")
 
+    def _on_toggle_play_vs_ai(self) -> None:
+        enabled = bool(self._play_vs_ai_var.get())
+        estado = "activado" if enabled else "desactivado"
+        self._log_to_console("SYS", f"Modo 'Jugar contra IA' {estado}.")
+        if enabled:
+            self._maybe_trigger_ai_turn()
+
+    def _is_ai_turn(self) -> bool:
+        if not self._play_vs_ai_var.get() or self.chess_engine.board.is_game_over():
+            return False
+        robot_color = str(self.config_manager.get("chess", "robot_color", default="black")).lower()
+        ai_is_white = robot_color == "white"
+        return (self.chess_engine.board.turn == chess.WHITE) if ai_is_white else (self.chess_engine.board.turn == chess.BLACK)
+
     def _sync_human_delay_timer(self) -> None:
-        """Activa el temporizador de demora solo cuando es el turno del jugador humano."""
+        """Activa o reinicia el temporizador de demora durante el turno del jugador humano."""
         if self.chess_engine.board.is_game_over():
             self.audio.stop_delay_timer()
             return
-        robot_color = str(self.config_manager.get("chess", "robot_color", default="black")).lower()
-        human_is_white = robot_color != "white"
-        is_human_turn = (self.chess_engine.board.turn is True) if human_is_white else (self.chess_engine.board.turn is False)
-        if is_human_turn:
-            self.audio.start_delay_timer()
+        if self._play_vs_ai_var.get():
+            if self._is_ai_turn():
+                self.audio.stop_delay_timer()
+            else:
+                self.audio.start_delay_timer()
         else:
-            self.audio.stop_delay_timer()
+            # En modo 2 jugadores humanos / pruebas manuales, reinicia el temporizador en cada jugada
+            self.audio.start_delay_timer()
 
     def _trigger_humor_for_outcome(self, outcome: Any) -> None:
         if "checkmate" in outcome.audio_events:
@@ -1345,33 +1427,142 @@ class ChessRobotApp(ctk.CTk):
                 self.audio.announce(ev)
 
     # ------------------------------------------------------------------
-    # Tablero, Ajedrez y Consola Manual
+    # Tablero Interactivo 8x8, Ajedrez, IA y Consola Manual
     # ------------------------------------------------------------------
     def _update_chess_panel(self) -> None:
-        self.lbl_game_status.configure(text=self.chess_engine.get_status_text_es())
-        self.txt_board_ascii.configure(state="normal")
-        self.txt_board_ascii.delete("1.0", "end")
-        self.txt_board_ascii.insert("1.0", str(self.chess_engine.board))
-        self.txt_board_ascii.configure(state="disabled")
+        if self._ai_thinking:
+            self.lbl_game_status.configure(text="IA pensando su jugada...")
+        else:
+            self.lbl_game_status.configure(text=self.chess_engine.get_status_text_es())
+        self._draw_chessboard()
 
-    def _on_execute_manual_move(self) -> None:
-        move_str = self.ent_manual_move.get().strip()
-        outcome = self.chess_engine.apply_move_str(move_str)
-        self._log_to_console("SYS", outcome.message_es)
+    def _draw_chessboard(self) -> None:
+        """Renderiza el tablero 8x8 clicable con piezas Unicode y resaltados de jugadas legales."""
+        canvas = self.board_canvas
+        canvas.delete("all")
 
-        if not outcome.valid or not outcome.move_uci:
-            for ev in outcome.audio_events:
-                self.audio.announce(ev)
-            messagebox.showwarning("Jugada inválida", outcome.message_es)
+        sq_px = self._board_square_px
+        margin = self._board_margin_px
+        board = self.chess_engine.board
+
+        checked_king_sq: Optional[str] = None
+        if board.is_check():
+            king_sq_idx = board.king(board.turn)
+            if king_sq_idx is not None:
+                checked_king_sq = chess.square_name(king_sq_idx)
+
+        for row in range(8):
+            rank_idx = 7 - row  # fila superior = 8, inferior = 1
+            y0 = 4 + row * sq_px
+            y1 = y0 + sq_px
+            # Etiqueta de fila (1-8)
+            canvas.create_text(
+                margin // 2,
+                (y0 + y1) // 2,
+                text=BOARD_RANKS[rank_idx],
+                fill="#94a3b8",
+                font=("Segoe UI", 10, "bold"),
+            )
+
+            for col in range(8):
+                x0 = margin + col * sq_px
+                x1 = x0 + sq_px
+                sq_name = f"{BOARD_FILES[col]}{BOARD_RANKS[rank_idx]}"
+                is_light = (row + col) % 2 == 0
+
+                fill = "#F0D9B5" if is_light else "#B58863"
+                if self._last_move_squares and sq_name in self._last_move_squares:
+                    fill = "#CDD26A" if is_light else "#AAA23A"
+                if sq_name == self._selected_square:
+                    fill = "#F6F669"
+                if sq_name == checked_king_sq:
+                    fill = "#E04F5F"
+
+                canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline="#1f2937", width=1)
+
+                # Indicador visual de casilla destino legal
+                piece = board.piece_at(chess.parse_square(sq_name))
+                if sq_name in self._legal_targets:
+                    cx = (x0 + x1) // 2
+                    cy = (y0 + y1) // 2
+                    if piece is None:
+                        r = sq_px // 6
+                        canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#2d6a4f", outline="")
+                    else:
+                        pad = 3
+                        canvas.create_oval(
+                            x0 + pad, y0 + pad, x1 - pad, y1 - pad, outline="#15803d", width=3
+                        )
+
+                # Pieza Unicode con alto contraste
+                if piece is not None:
+                    glyph = UNICODE_PIECES.get(piece.symbol(), "")
+                    cx = (x0 + x1) // 2
+                    cy = (y0 + y1) // 2
+                    if piece.color == chess.WHITE:
+                        # Contorno oscuro suave para que las piezas blancas resalten en casillas claras
+                        canvas.create_text(
+                            cx + 1, cy + 1, text=glyph, fill="#111827", font=("Segoe UI Symbol", 24)
+                        )
+                        canvas.create_text(
+                            cx, cy, text=glyph, fill="#ffffff", font=("Segoe UI Symbol", 24)
+                        )
+                    else:
+                        canvas.create_text(
+                            cx, cy, text=glyph, fill="#111111", font=("Segoe UI Symbol", 24)
+                        )
+
+        # Etiquetas de columnas (a-h)
+        y_lbl = 4 + 8 * sq_px + 10
+        for col in range(8):
+            cx = margin + col * sq_px + sq_px // 2
+            canvas.create_text(
+                cx,
+                y_lbl,
+                text=BOARD_FILES[col].upper(),
+                fill="#94a3b8",
+                font=("Segoe UI", 10, "bold"),
+            )
+
+    def _on_board_click(self, event: tk.Event) -> None:
+        if self._ai_thinking or self.chess_engine.board.is_game_over():
             return
 
-        self._trigger_humor_for_outcome(outcome)
-        self.ent_manual_move.delete(0, "end")
-        self._update_chess_panel()
-        self._sync_human_delay_timer()
+        col = (event.x - self._board_margin_px) // self._board_square_px
+        row = (event.y - 4) // self._board_square_px
+        if not (0 <= col < 8 and 0 <= row < 8):
+            return
 
+        sq_name = f"{BOARD_FILES[col]}{BOARD_RANKS[7 - row]}"
+        board = self.chess_engine.board
+
+        # Si ya había una casilla seleccionada y el clic cae en un destino legal -> ejecutar jugada
+        if self._selected_square is not None and sq_name in self._legal_targets:
+            src = self._selected_square
+            self._selected_square = None
+            self._legal_targets = []
+            outcome = self.chess_engine.apply_move_squares(src, sq_name)
+            self._handle_applied_move(outcome, trigger_ai=True)
+            return
+
+        # Seleccionar pieza del bando al que le toca mover
+        clicked_piece = board.piece_at(chess.parse_square(sq_name))
+        if clicked_piece is not None and clicked_piece.color == board.turn:
+            self._selected_square = sq_name
+            self._legal_targets = self.chess_engine.get_legal_destinations(sq_name)
+        else:
+            self._selected_square = None
+            self._legal_targets = []
+        self._draw_chessboard()
+
+    def _dispatch_robot_move(self, outcome: Any) -> None:
+        if not outcome.move_uci:
+            return
         if not self.robot.is_connected:
-            self._log_to_console("SYS", "Jugada registrada lógicamente (robot desconectado).")
+            self._log_to_console(
+                "SYS",
+                "Jugada registrada en tablero (conectá el Arduino o activá 'Modo Simulación' para enviar G-code).",
+            )
             return
 
         src_sq = outcome.move_uci[:2]
@@ -1391,7 +1582,62 @@ class ChessRobotApp(ctk.CTk):
         else:
             self.robot.execute_pick_and_place(src_xy, dst_xy, is_capture=outcome.is_capture)
 
+    def _handle_applied_move(self, outcome: Any, trigger_ai: bool = True) -> None:
+        self._log_to_console("SYS", outcome.message_es)
+        if not outcome.valid or not outcome.move_uci:
+            return
+
+        self._last_move_squares = (outcome.move_uci[:2], outcome.move_uci[2:4])
+        self._selected_square = None
+        self._legal_targets = []
+        self._update_chess_panel()
+        self._trigger_humor_for_outcome(outcome)
+        self._dispatch_robot_move(outcome)
+        self._sync_human_delay_timer()
+
+        if trigger_ai:
+            self._maybe_trigger_ai_turn()
+
+    def _maybe_trigger_ai_turn(self) -> None:
+        if self._ai_thinking or not self._is_ai_turn():
+            return
+        self._ai_thinking = True
+        self._update_chess_panel()
+
+        def worker() -> None:
+            time.sleep(0.45)
+            uci, msg = self.chess_engine.compute_best_move(allow_fallback=True)
+            self.after(0, lambda: self._finish_ai_turn(uci, msg))
+
+        threading.Thread(target=worker, name="ChessAIWorker", daemon=True).start()
+
+    def _finish_ai_turn(self, move_uci: Optional[str], info_msg: str) -> None:
+        self._ai_thinking = False
+        if not move_uci or self.chess_engine.board.is_game_over():
+            self._update_chess_panel()
+            return
+        self._log_to_console("SYS", info_msg)
+        outcome = self.chess_engine.apply_move_str(move_uci)
+        self._handle_applied_move(outcome, trigger_ai=False)
+
+    def _on_execute_manual_move(self) -> None:
+        if self._ai_thinking:
+            return
+        move_str = self.ent_manual_move.get().strip()
+        outcome = self.chess_engine.apply_move_str(move_str)
+        if not outcome.valid or not outcome.move_uci:
+            self._log_to_console("SYS", outcome.message_es)
+            for ev in outcome.audio_events:
+                self.audio.announce(ev)
+            messagebox.showwarning("Jugada inválida", outcome.message_es)
+            return
+
+        self.ent_manual_move.delete(0, "end")
+        self._handle_applied_move(outcome, trigger_ai=True)
+
     def _on_detect_move_from_vision(self) -> None:
+        if self._ai_thinking:
+            return
         if not self.vision.calibrator.is_calibrated:
             messagebox.showinfo(
                 "Falta calibración",
@@ -1400,21 +1646,27 @@ class ChessRobotApp(ctk.CTk):
             return
         observed = self.vision.get_board_occupancy_map()
         outcome = self.chess_engine.detect_human_move_from_vision(observed)
-        self._log_to_console("SYS", outcome.message_es)
         if outcome.valid:
-            self._trigger_humor_for_outcome(outcome)
-            self._update_chess_panel()
-            self._sync_human_delay_timer()
+            self._handle_applied_move(outcome, trigger_ai=True)
         else:
+            self._log_to_console("SYS", outcome.message_es)
             for ev in outcome.audio_events:
                 self.audio.announce(ev)
 
-    def _on_reset_game(self) -> None:
+    def _on_new_game(self) -> None:
+        self._ai_thinking = False
+        self._selected_square = None
+        self._legal_targets = []
+        self._last_move_squares = None
         self.chess_engine.reset_game()
         self._update_chess_panel()
-        self._log_to_console("SYS", "Partida reiniciada a posición inicial.")
+        self._log_to_console("SYS", "Nueva partida iniciada. Turno de las Blancas.")
         self.audio.play_event("inicio")
         self._sync_human_delay_timer()
+        self._maybe_trigger_ai_turn()
+
+    def _on_reset_game(self) -> None:
+        self._on_new_game()
 
     def _on_send_manual_gcode(self) -> None:
         cmd = self.ent_gcode.get().strip()

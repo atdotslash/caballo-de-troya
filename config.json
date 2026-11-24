@@ -96,6 +96,7 @@
   },
   "audio": {
     "enabled": true,
+    "use_tts": false,
     "preferred_locale": "es-AR",
     "rate": 175,
     "volume": 1.0,

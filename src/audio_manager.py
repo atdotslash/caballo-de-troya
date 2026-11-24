@@ -57,6 +57,7 @@ class AudioManager:
     def __init__(
         self,
         enabled: bool = True,
+        use_tts: bool = False,
         preferred_locale: str = "es-AR",
         rate: int = 175,
         volume: float = 1.0,
@@ -69,6 +70,7 @@ class AudioManager:
         on_log: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.enabled = enabled
+        self.use_tts = bool(use_tts)
         self.preferred_locale = preferred_locale
         self.rate = rate
         self.volume = max(0.0, min(1.0, float(volume)))
@@ -100,18 +102,22 @@ class AudioManager:
         self._delay_timer: Optional[threading.Timer] = None
         self._human_turn_active = False
 
-        # Hilo dedicado de TTS offline (Windows SAPI5)
+        # Hilo dedicado de TTS offline (solo si use_tts está habilitado)
         self._queue: queue.Queue[Optional[str]] = queue.Queue()
         self._stop_event = threading.Event()
-        self._selected_voice_name: str = "Sin inicializar"
+        self._selected_voice_name: str = "Desactivado (Modo Solo Clips MP3)"
         self._available: bool = False
+        self._worker: Optional[threading.Thread] = None
 
-        self._worker = threading.Thread(
-            target=self._worker_loop,
-            name="AudioTTSWorker",
-            daemon=True,
-        )
-        self._worker.start()
+        if self.use_tts:
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="AudioTTSWorker",
+                daemon=True,
+            )
+            self._worker.start()
+        else:
+            self._log("[AUDIO] Modo solo clips MP3 activo (TTS pyttsx3 desactivado por configuración).")
 
     # ------------------------------------------------------------------
     # Descubrimiento y carga de recursos existentes (solo lectura)
@@ -251,10 +257,10 @@ class AudioManager:
         return random.choice(candidates or items)
 
     def play_event(self, category: str, force_mode: Optional[str] = None) -> Optional[Tuple[str, str]]:
-        """Dispara aleatoriamente un clip de sounds/<category>/ o una frase TTS sarcástica.
+        """Reproduce un clip de `assets/sounds/<category>/` (o frase TTS si `use_tts=True`).
 
-        Evita repeticiones inmediatas tanto en clips como en frases.
-        Devuelve `(modo, detalle)` donde `modo` es `'clip'` o `'tts'`, o `None` si está deshabilitado.
+        En Modo Solo Audio (`use_tts=False`, predeterminado), reproduce exclusivamente
+        los archivos `.mp3`/`.wav` de `assets/sounds/<category>/` evitando repeticiones inmediatas.
         """
         cat = category.lower().strip()
         if cat not in HUMOR_CATEGORIES:
@@ -266,16 +272,17 @@ class AudioManager:
         clips = self._sound_clips.get(cat, [])
         phrases = self._humor_phrases.get(cat, [])
         can_clip = bool(clips) and self._mixer_ready
-        can_tts = bool(phrases)
+        can_tts = bool(phrases) and self.use_tts
 
         if not can_clip and not can_tts:
-            self._log(f"[HUMOR] Sin clips ni frases disponibles para la categoría '{cat}'.")
+            self._log(f"[HUMOR] Sin clips de audio disponibles para la categoría '{cat}'.")
             return None
 
-        if force_mode in ("clip", "tts"):
+        if not self.use_tts:
+            mode = "clip"
+        elif force_mode in ("clip", "tts"):
             mode = force_mode if ((force_mode == "clip" and can_clip) or (force_mode == "tts" and can_tts)) else ("clip" if can_clip else "tts")
         elif can_clip and can_tts:
-            # 50/50 entre clip MP3 y frase TTS es-AR
             mode = random.choice(("clip", "tts"))
         elif can_clip:
             mode = "clip"
@@ -291,7 +298,6 @@ class AudioManager:
             if self.play_clip(chosen_clip):
                 self._log(f"[HUMOR] Clip ({cat}): {chosen_clip.name}")
                 return ("clip", chosen_clip.name)
-            # Fallback automático a TTS si fallara la decodificación del clip
             if can_tts:
                 mode = "tts"
             else:
@@ -461,15 +467,17 @@ class AudioManager:
                     pass
 
     def speak(self, text: str, interrupt: bool = False) -> None:
-        """Encola una frase para ser hablada en segundo plano sin bloquear el hilo llamador."""
-        if not self.enabled or not text or not text.strip():
+        """Encola una frase para ser hablada en segundo plano (si `use_tts` está habilitado)."""
+        if not self.enabled or not self.use_tts or not text or not text.strip():
             return
         if interrupt:
             self.clear_queue()
         self._queue.put(text.strip())
 
     def announce(self, event_key: str, interrupt: bool = False) -> None:
-        """Anuncia un evento predefinido en Español de Argentina."""
+        """Anuncia un evento predefinido en Español de Argentina (si `use_tts` está habilitado)."""
+        if not self.use_tts:
+            return
         phrase = EVENT_PHRASES_ES_AR.get(event_key)
         if phrase:
             self.speak(phrase, interrupt=interrupt)
@@ -489,7 +497,7 @@ class AudioManager:
         self._stop_event.set()
         self.clear_queue()
         self._queue.put(None)
-        if self._worker.is_alive():
+        if self._worker is not None and self._worker.is_alive():
             self._worker.join(timeout=1.5)
         try:
             import pygame  # type: ignore

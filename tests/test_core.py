@@ -168,9 +168,24 @@ class TestChessEngine(unittest.TestCase):
         self.assertTrue(mate.valid)
         self.assertIn("checkmate", mate.audio_events)
 
+    def test_legal_destinations_and_fallback_minimax_ai(self) -> None:
+        eng = ChessGameEngine()
+        self.assertEqual(eng.get_legal_destinations("e2"), ["e3", "e4"])
+        res = eng.apply_move_squares("e2", "e4")
+        self.assertTrue(res.valid)
+        self.assertEqual(res.move_uci, "e2e4")
+
+        # Sin Stockfish configurado, la IA interna Minimax profundidad 2 devuelve una jugada legal
+        ai_uci, info = eng.compute_best_move(allow_fallback=True)
+        self.assertIsNotNone(ai_uci)
+        assert ai_uci is not None
+        self.assertIn("Minimax", info)
+        ai_outcome = eng.apply_move_str(ai_uci)
+        self.assertTrue(ai_outcome.valid)
+
 
 class TestAudioAndHumor(unittest.TestCase):
-    def test_humor_json_counts_and_existing_mp3_discovery_and_playback(self) -> None:
+    def test_audio_only_mode_plays_only_mp3_and_avoids_immediate_repeats(self) -> None:
         phrases_file = ROOT_DIR / "assets" / "frases_humor.json"
         self.assertTrue(phrases_file.exists())
         data = json.loads(phrases_file.read_text(encoding="utf-8"))
@@ -182,34 +197,32 @@ class TestAudioAndHumor(unittest.TestCase):
 
         audio = AudioManager(
             enabled=True,
-            volume=0.0,  # volumen 0 para pruebas automatizadas silenciosas
+            use_tts=False,  # Modo solo clips MP3 por defecto
+            volume=0.0,
             project_root=ROOT_DIR,
             humor_enabled=True,
             humor_timer_enabled=False,
         )
         try:
+            self.assertFalse(audio.use_tts)
             self.assertTrue(audio.is_mixer_ready, "pygame.mixer debería estar inicializado")
 
-            # Verifica descubrimiento de .mp3 existentes en las 5 carpetas sin borrar nada
             for cat in HUMOR_CATEGORIES:
                 clips = audio.get_sound_clips(cat)
                 self.assertGreater(len(clips), 0, f"Debería haber clips .mp3 en {cat}")
 
-            # Prueba carga y reproducción real de un .mp3 por categoría con pygame.mixer
+            # En modo solo audio (use_tts=False), play_event SIEMPRE elige clips .mp3
             for cat in HUMOR_CATEGORIES:
-                res = audio.play_event(cat, force_mode="clip")
-                self.assertIsNotNone(res)
-                assert res is not None
-                self.assertEqual(res[0], "clip")
-                self.assertTrue(res[1].lower().endswith((".mp3", ".wav")))
+                res1 = audio.play_event(cat)
+                res2 = audio.play_event(cat)
+                self.assertIsNotNone(res1)
+                self.assertIsNotNone(res2)
+                assert res1 is not None and res2 is not None
+                self.assertEqual(res1[0], "clip")
+                self.assertEqual(res2[0], "clip")
+                self.assertTrue(res1[1].lower().endswith((".mp3", ".wav")))
+                self.assertNotEqual(res1[1], res2[1], f"No debe repetir clip inmediato en {cat}")
             audio.stop_clip()
-
-            # Verifica que evita repeticiones inmediatas en frases TTS
-            first = audio.play_event("jaque", force_mode="tts")
-            second = audio.play_event("jaque", force_mode="tts")
-            self.assertIsNotNone(first)
-            self.assertIsNotNone(second)
-            self.assertNotEqual(first, second)
         finally:
             audio.shutdown()
 

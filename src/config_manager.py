@@ -98,6 +98,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "audio": {
         "enabled": True,
+        "use_tts": False,
         "preferred_locale": "es-AR",
         "rate": 175,
         "volume": 1.0,
