@@ -1,6 +1,6 @@
 {
   "serial": {
-    "port": "",
+    "port": "COM4",
     "baudrate": 115200,
     "timeout": 1.0,
     "status_poll_interval_s": 0.25,
@@ -10,9 +10,14 @@
     "z_safe_mm": 45.0,
     "z_pick_mm": 5.0,
     "z_place_mm": 7.0,
-    "default_jog_feed_mm_min": 1800.0,
+    "default_jog_feed_mm_min": 1200.0,
     "plunge_feed_mm_min": 900.0,
     "travel_mode": "G0",
+    "steps_per_mm": {
+      "$100": 80.0,
+      "$101": 80.0,
+      "$102": 400.0
+    },
     "standby_position": {
       "x": 10.0,
       "y": 10.0,
@@ -27,7 +32,7 @@
   },
   "gripper": {
     "open_pwm": 65,
-    "close_pwm": 155,
+    "close_pwm": 65,
     "min_pwm": 0,
     "max_pwm": 255,
     "dwell_seconds": 0.45,
@@ -87,10 +92,22 @@
       ],
       "pixel_corners": [],
       "machine_corners_mm": [
-        [20.0, 260.0],
-        [260.0, 260.0],
-        [260.0, 20.0],
-        [20.0, 20.0]
+        [
+          20.0,
+          260.0
+        ],
+        [
+          260.0,
+          260.0
+        ],
+        [
+          260.0,
+          20.0
+        ],
+        [
+          20.0,
+          20.0
+        ]
       ]
     }
   },
@@ -101,7 +118,7 @@
     "rate": 175,
     "volume": 1.0,
     "humor_enabled": true,
-    "humor_timer_enabled": true,
+    "humor_timer_enabled": false,
     "delay_warning_seconds": 30,
     "sounds_dir": "",
     "phrases_path": "assets/frases_humor.json"

@@ -35,7 +35,15 @@ POS_REGEX = re.compile(
     r"(?:MPos|WPos):(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)"
 )
 AXIS_TOKEN_REGEX = re.compile(r"([XYZPS])(-?\d+(?:\.\d+)?)", re.IGNORECASE)
-GRBL_PARAM_REGEX = re.compile(r"^(\$1[12][0-2])=(-?\d+(?:\.\d+)?)$")
+GRBL_PARAM_REGEX = re.compile(r"^(\$\d+)=(-?\d+(?:\.\d+)?)$")
+
+
+def _fmt_gcode_num(value: float) -> str:
+    """Formatea coordenadas de jog limpiamente (ej: -10.0 -> '-10.0', 0.5 -> '0.5')."""
+    text = f"{value:.3f}".rstrip("0")
+    if text.endswith("."):
+        text += "0"
+    return text
 
 
 @dataclass
@@ -68,11 +76,13 @@ class RobotController:
         on_log: Optional[Callable[[str, str], None]] = None,
         on_status: Optional[Callable[[MachineStatus], None]] = None,
         on_connection_change: Optional[Callable[[bool, str], None]] = None,
+        on_grbl_settings: Optional[Callable[[Dict[str, float]], None]] = None,
     ) -> None:
         self._get_config = config_getter
         self._on_log = on_log
         self._on_status = on_status
         self._on_connection_change = on_connection_change
+        self._on_grbl_settings = on_grbl_settings
 
         self._serial: Optional[serial.Serial] = None
         self._serial_lock = threading.RLock()
@@ -90,6 +100,10 @@ class RobotController:
         self._poll_thread: Optional[threading.Thread] = None
         self._sim_thread: Optional[threading.Thread] = None
 
+        # Caché de parámetros EEPROM leídos desde GRBL ($100, $101, $102, $110..$122, etc.)
+        self._grbl_settings_lock = threading.RLock()
+        self._grbl_settings: Dict[str, float] = {}
+
         # Estado interno del simulador mock
         self._sim_lock = threading.RLock()
         self._sim_x = 0.0
@@ -98,7 +112,11 @@ class RobotController:
         self._sim_abs_mode = True
         self._sim_state = "Idle"
         self._sim_pwm = 0
+        steps_cfg = self._get_config().get("motion", {}).get("steps_per_mm", {})
         self._sim_params: Dict[str, float] = {
+            "$100": float(steps_cfg.get("$100", 80.0)),
+            "$101": float(steps_cfg.get("$101", 80.0)),
+            "$102": float(steps_cfg.get("$102", 400.0)),
             "$110": 3000.0,
             "$111": 3000.0,
             "$112": 1500.0,
@@ -369,16 +387,21 @@ class RobotController:
         if upper == "$$":
             time.sleep(0.12)
             with self._sim_lock:
-                for k, v in self._sim_params.items():
-                    self._emit_log("SIM", f"<< {k}={v:.1f}")
+                snapshot = dict(self._sim_params)
+            for k, v in snapshot.items():
+                self._emit_log("SIM", f"<< {k}={v:.3f}")
+                self._record_grbl_setting(k, v)
             return True, "ok"
 
-        # Escritura de parámetro GRBL ($110=3000.0, etc.)
+        # Escritura de parámetro GRBL ($100=80.0, $110=3000.0, etc.)
         param_match = GRBL_PARAM_REGEX.match(upper)
         if param_match:
             time.sleep(0.10)
+            key = param_match.group(1)
+            val = float(param_match.group(2))
             with self._sim_lock:
-                self._sim_params[param_match.group(1)] = float(param_match.group(2))
+                self._sim_params[key] = val
+            self._record_grbl_setting(key, val)
             return True, "ok"
 
         # Modo absoluto / relativo / unidades
@@ -497,6 +520,11 @@ class RobotController:
 
             self._emit_log("RX", line)
 
+            # Captura líneas de EEPROM ($100=80.000, $101=80.000, $102=400.000, etc.)
+            setting_match = GRBL_PARAM_REGEX.match(line)
+            if setting_match:
+                self._record_grbl_setting(setting_match.group(1), float(setting_match.group(2)))
+
             lower = line.lower()
             if lower == "ok" or lower.startswith("error:") or lower.startswith("alarm:"):
                 with self._pending_cmd_lock:
@@ -596,6 +624,54 @@ class RobotController:
             self._emit_log("SIM", f"<< {self._status.raw}")
             return True
         return self._send_realtime_byte(b"?", log_label=None)
+
+    def _record_grbl_setting(self, key: str, value: float) -> None:
+        with self._grbl_settings_lock:
+            self._grbl_settings[key] = value
+            snapshot = dict(self._grbl_settings)
+        if self._on_grbl_settings:
+            try:
+                self._on_grbl_settings(snapshot)
+            except Exception:
+                pass
+
+    def get_cached_grbl_settings(self) -> Dict[str, float]:
+        with self._grbl_settings_lock:
+            return dict(self._grbl_settings)
+
+    def read_grbl_settings(self) -> None:
+        """Solicita a GRBL la lectura completa de parámetros EEPROM (`$$`)."""
+        self.enqueue_gcode("$$")
+
+    def write_steps_per_mm(
+        self, x_steps: float, y_steps: float, z_steps: float
+    ) -> Tuple[bool, str]:
+        """Escribe los parámetros de calibración pasos/mm ($100, $101, $102) en EEPROM GRBL."""
+        if not self._connected:
+            return False, "Conectá el Arduino o activá Modo Simulación antes de escribir en EEPROM."
+        prefix = "SIM" if self._simulation_mode else "SYS"
+        self._emit_log(
+            prefix,
+            f"Escribiendo pasos/mm en EEPROM: $100={x_steps:.3f}, $101={y_steps:.3f}, $102={z_steps:.3f}",
+        )
+        self.enqueue_gcode(f"$100={x_steps:.3f}")
+        self.enqueue_gcode(f"$101={y_steps:.3f}")
+        self.enqueue_gcode(f"$102={z_steps:.3f}")
+        return True, "Pasos/mm ($100, $101, $102) enviados a EEPROM GRBL."
+
+    def cancel_jog(self) -> None:
+        """Envía inmediatamente el byte en tiempo real GRBL Jog Cancel (0x85) y vacía cola pendiente."""
+        self._clear_queue()
+        if not self._connected:
+            return
+        if self._simulation_mode:
+            with self._sim_lock:
+                if self._sim_state == "Jog":
+                    self._sim_state = "Idle"
+            self._emit_log("SIM", ">> 0x85 [CANCELAR JOG]")
+            self._emit_sim_status()
+            return
+        self._send_realtime_byte(b"\x85", log_label="0x85 [CANCELAR JOG]")
 
     def emergency_stop(self) -> None:
         """Parada de emergencia inmediata: envía `!` (Feed Hold) y vacía la cola pendiente."""
@@ -719,11 +795,26 @@ class RobotController:
         dz: float = 0.0,
         feed_rate: Optional[float] = None,
     ) -> None:
-        """Movimiento manual incremental combinando ejes con comando nativo GRBL 1.1 `$J=`."""
+        """Movimiento manual incremental de eje único (o ejes activos) vía GRBL 1.1 `$J=`.
+
+        Solo incluye los ejes distintos de cero (ej: `$J=G91 G21 X-10.0 F1200`) para evitar
+        enviar `Y0.000 Z0.000` innecesarios al mover un solo eje.
+        """
+        axis_parts: List[str] = []
+        if abs(dx) > 1e-6:
+            axis_parts.append(f"X{_fmt_gcode_num(dx)}")
+        if abs(dy) > 1e-6:
+            axis_parts.append(f"Y{_fmt_gcode_num(dy)}")
+        if abs(dz) > 1e-6:
+            axis_parts.append(f"Z{_fmt_gcode_num(dz)}")
+        if not axis_parts:
+            return
+
         f = feed_rate if feed_rate is not None else float(
-            self._get_config().get("motion", {}).get("default_jog_feed_mm_min", 1800.0)
+            self._get_config().get("motion", {}).get("default_jog_feed_mm_min", 1200.0)
         )
-        line = f"$J=G91 G21 X{dx:.3f} Y{dy:.3f} Z{dz:.3f} F{f:.1f}"
+        feed_str = f"{f:.0f}" if abs(f - round(f)) < 1e-3 else f"{f:.1f}"
+        line = f"$J=G91 G21 {' '.join(axis_parts)} F{feed_str}"
         self.enqueue_gcode(line)
 
     def dwell(self, seconds: float) -> None:

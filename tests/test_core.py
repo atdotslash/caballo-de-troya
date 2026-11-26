@@ -92,6 +92,14 @@ class TestRobotControllerGCodeAndSimulation(unittest.TestCase):
         ctrl.move_simultaneous(50.0, 30.0, 10.0, rapid=True)
         self.assertEqual(emitted[-1], "G0 X50.000 Y30.000 Z10.000")
 
+        # Jog de eje único: SOLO debe enviar el eje activo (sin Y0.000 Z0.000)
+        ctrl.jog_relative(dx=-10.0, dy=0.0, dz=0.0, feed_rate=1200.0)
+        self.assertEqual(emitted[-1], "$J=G91 G21 X-10.0 F1200")
+        ctrl.jog_relative(dx=0.0, dy=5.5, dz=0.0, feed_rate=1200.0)
+        self.assertEqual(emitted[-1], "$J=G91 G21 Y5.5 F1200")
+        ctrl.jog_relative(dx=0.0, dy=0.0, dz=-1.0, feed_rate=1200.0)
+        self.assertEqual(emitted[-1], "$J=G91 G21 Z-1.0 F1200")
+
         emitted.clear()
         ctrl.press_chess_clock(return_standby=True)
         self.assertTrue(any(line.startswith("G0 X280.000 Y140.000 Z45.000") for line in emitted))
@@ -102,9 +110,11 @@ class TestRobotControllerGCodeAndSimulation(unittest.TestCase):
     def test_simulation_mode_realtime_mpos_and_sim_logs(self) -> None:
         cm = ConfigManager(ROOT_DIR / "config.json")
         logs: list[tuple[str, str]] = []
+        captured_settings: list[dict[str, float]] = []
         ctrl = RobotController(
             config_getter=lambda: cm.data,
             on_log=lambda d, m: logs.append((d, m)),
+            on_grbl_settings=lambda s: captured_settings.append(s),
         )
         try:
             ok, _ = ctrl.connect_simulation()
@@ -121,13 +131,26 @@ class TestRobotControllerGCodeAndSimulation(unittest.TestCase):
             self.assertAlmostEqual(ctrl.status.z, 15.0, places=2)
             self.assertTrue(ctrl.status.simulated)
 
-            # Jog incremental $J=G91
-            ok_jog, resp_jog = ctrl.enqueue_gcode("$J=G91 G21 X10.0 Y-5.0 Z2.5 F1800", wait=True)
+            # Jog incremental de eje único $J=G91 G21 X-10.0 F1200
+            ok_jog, resp_jog = ctrl.enqueue_gcode("$J=G91 G21 X-10.0 F1200", wait=True)
             self.assertTrue(ok_jog)
             self.assertEqual(resp_jog, "ok")
-            self.assertAlmostEqual(ctrl.status.x, 60.0, places=2)
-            self.assertAlmostEqual(ctrl.status.y, 25.0, places=2)
-            self.assertAlmostEqual(ctrl.status.z, 17.5, places=2)
+            self.assertAlmostEqual(ctrl.status.x, 40.0, places=2)
+            self.assertAlmostEqual(ctrl.status.y, 30.0, places=2)
+
+            # Cancelación de jog en tiempo real (0x85)
+            ctrl.cancel_jog()
+            self.assertTrue(any("0x85 [CANCELAR JOG]" in m for d, m in logs if d == "SIM"))
+
+            # Lectura y escritura de pasos/mm ($100, $101, $102)
+            ok_wr, _ = ctrl.write_steps_per_mm(81.25, 79.5, 400.0)
+            self.assertTrue(ok_wr)
+            ok_rd, _ = ctrl.enqueue_gcode("$$", wait=True)
+            self.assertTrue(ok_rd)
+            self.assertTrue(captured_settings)
+            self.assertAlmostEqual(captured_settings[-1]["$100"], 81.25, places=2)
+            self.assertAlmostEqual(captured_settings[-1]["$101"], 79.5, places=2)
+            self.assertAlmostEqual(captured_settings[-1]["$102"], 400.0, places=2)
 
             # Servo garra M3/M5
             ok_m3, _ = ctrl.enqueue_gcode("M3 S150", wait=True)

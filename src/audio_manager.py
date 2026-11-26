@@ -24,6 +24,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from src.paths import get_bundle_dir, get_runtime_dir
+
 logger = logging.getLogger(__name__)
 
 AUDIO_EXTENSIONS = (".mp3", ".wav")
@@ -79,9 +81,10 @@ class AudioManager:
         self.delay_warning_seconds = max(3.0, float(delay_warning_seconds))
         self._on_log = on_log
 
-        self._root = Path(project_root).resolve() if project_root else Path(__file__).resolve().parent.parent
+        self._root = Path(project_root).resolve() if project_root else get_runtime_dir()
+        self._bundle_root = Path(project_root).resolve() if project_root else get_bundle_dir()
         self.sounds_dir = self._resolve_sounds_dir(sounds_dir)
-        self.phrases_path = self._resolve_path(phrases_path)
+        self.phrases_path = self._resolve_phrases_path(phrases_path)
 
         # Inventario dinámico de sonidos existentes y frases JSON
         self._sound_clips: Dict[str, List[Path]] = {cat: [] for cat in HUMOR_CATEGORIES}
@@ -126,13 +129,30 @@ class AudioManager:
         p = Path(path_val)
         return p if p.is_absolute() else (self._root / p).resolve()
 
+    def _resolve_phrases_path(self, configured_path: str | Path) -> Path:
+        """Prioriza `assets/frases_humor.json` externo junto al .exe, con respaldo en _MEIPASS."""
+        external = self._resolve_path(configured_path)
+        if external.exists():
+            return external
+        p = Path(configured_path)
+        if not p.is_absolute():
+            bundled = (self._bundle_root / p).resolve()
+            if bundled.exists():
+                return bundled
+        return external
+
     def _resolve_sounds_dir(self, configured_dir: str | Path) -> Path:
-        """Ubica automáticamente `assets/sounds/` o `sounds/` sin modificar ningún archivo."""
+        """Ubica automáticamente `assets/sounds/` o `sounds/` junto al .exe sin modificar archivos."""
         candidates: List[Path] = []
         if str(configured_dir).strip():
             candidates.append(self._resolve_path(configured_dir))
+        # Prioridad 1: carpetas editables junto al ejecutable (.exe) / raíz del proyecto
         candidates.append((self._root / "assets" / "sounds").resolve())
         candidates.append((self._root / "sounds").resolve())
+        # Prioridad 2: respaldo empaquetado si existe en _MEIPASS
+        if self._bundle_root != self._root:
+            candidates.append((self._bundle_root / "assets" / "sounds").resolve())
+            candidates.append((self._bundle_root / "sounds").resolve())
 
         for cand in candidates:
             if cand.exists() and cand.is_dir():

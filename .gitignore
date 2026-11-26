@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 *.json.tmp
 *.json.bak
+build/
+dist/

@@ -84,6 +84,11 @@ class ChessRobotApp(ctk.CTk):
         self._log_queue: queue.Queue[Tuple[str, str]] = queue.Queue()
         self._status_queue: queue.Queue[MachineStatus] = queue.Queue()
         self._conn_queue: queue.Queue[Tuple[bool, str]] = queue.Queue()
+        self._grbl_settings_queue: queue.Queue[Dict[str, float]] = queue.Queue()
+
+        # Debounce de jog y estado de teclado para cancelar jog (0x85)
+        self._last_jog_ts: float = 0.0
+        self._active_key_jog: Optional[str] = None
 
         # Módulos núcleo
         self.config_manager = ConfigManager(config_path)
@@ -111,7 +116,7 @@ class ChessRobotApp(ctk.CTk):
         self._legal_targets: List[str] = []
         self._last_move_squares: Optional[Tuple[str, str]] = None
         self._ai_thinking: bool = False
-        self._board_square_px: int = 44
+        self._board_square_px: int = 42
         self._board_margin_px: int = 20
 
         # Estado de calibración interactiva de 4 esquinas
@@ -129,7 +134,8 @@ class ChessRobotApp(ctk.CTk):
         self._update_chess_panel()
 
         # Arranque de cámara si es posible (sin bloquear)
-        self._log_to_console("SYS", "Aplicación iniciada. Revisá el puerto COM e iniciá la cámara para comenzar.")
+        self._bind_jog_hotkeys()
+        self._log_to_console("SYS", "Aplicación iniciada. Revisá el puerto COM o activá 'Modo Simulación'.")
         self.after(300, self._try_autostart_camera)
         self.after(40, self._ui_tick)
 
@@ -172,6 +178,7 @@ class ChessRobotApp(ctk.CTk):
             on_log=lambda direction, msg: self._log_queue.put((direction, msg)),
             on_status=lambda status: self._status_queue.put(status),
             on_connection_change=lambda conn, port: self._conn_queue.put((conn, port)),
+            on_grbl_settings=lambda settings: self._grbl_settings_queue.put(settings),
         )
 
         chess_cfg = self.config_manager.get("chess", default={})
@@ -189,11 +196,11 @@ class ChessRobotApp(ctk.CTk):
 
         self._build_top_serial_bar()
 
-        # Cuerpo principal: izquierda (cámara) + derecha (pestañas)
+        # Cuerpo principal: izquierda (cámara a pantalla completa) + derecha (panel amplio sin scroll)
         main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(4, 6))
-        main_frame.grid_columnconfigure(0, weight=3)
-        main_frame.grid_columnconfigure(1, weight=2, minsize=460)
+        main_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 4))
+        main_frame.grid_columnconfigure(0, weight=5)
+        main_frame.grid_columnconfigure(1, weight=5, minsize=580)
         main_frame.grid_rowconfigure(0, weight=1)
 
         self._build_vision_panel(main_frame)
@@ -354,9 +361,9 @@ class ChessRobotApp(ctk.CTk):
         )
         self.lbl_calib_banner.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 6))
 
-        # Contenedor de video interactivo
+        # Contenedor de video interactivo (sin márgenes desperdiciados)
         self.video_container = ctk.CTkFrame(panel, fg_color="#0f1117", corner_radius=6)
-        self.video_container.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 6))
+        self.video_container.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 4))
         self.video_container.grid_columnconfigure(0, weight=1)
         self.video_container.grid_rowconfigure(0, weight=1)
 
@@ -398,116 +405,173 @@ class ChessRobotApp(ctk.CTk):
         self._build_config_tab(tab_cfg)
 
     def _build_calibration_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
+        # Grilla equilibrada de 2 columnas: todos los controles visibles sin scroll vertical ni recortes
+        grid_root = ctk.CTkFrame(parent, fg_color="transparent")
+        grid_root.pack(fill="both", expand=True, padx=2, pady=2)
+        grid_root.grid_columnconfigure(0, weight=1, uniform="cal_col")
+        grid_root.grid_columnconfigure(1, weight=1, uniform="cal_col")
 
-        # ---- 1. Control Manual (Jog X/Y/Z) ----
-        jog_card = ctk.CTkFrame(scroll, corner_radius=8)
-        jog_card.pack(fill="x", padx=4, pady=(2, 8))
+        col_left = ctk.CTkFrame(grid_root, fg_color="transparent")
+        col_left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        col_right = ctk.CTkFrame(grid_root, fg_color="transparent")
+        col_right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+
+        # ==================== COLUMNA IZQUIERDA ====================
+        # ---- 1. Control Manual (Jog Eje Único X / Y / Z) ----
+        jog_card = ctk.CTkFrame(col_left, corner_radius=8)
+        jog_card.pack(fill="x", pady=(0, 6))
 
         ctk.CTkLabel(
             jog_card,
-            text="Control Manual (Jog X / Y / Z)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 4))
+            text="Control Manual (Jog Eje Único)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(6, 3))
 
         step_row = ctk.CTkFrame(jog_card, fg_color="transparent")
-        step_row.pack(fill="x", padx=10, pady=4)
-        ctk.CTkLabel(step_row, text="Paso (mm):").pack(side="left", padx=(0, 6))
+        step_row.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(step_row, text="Paso (mm):", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
         self.step_selector = ctk.CTkSegmentedButton(
             step_row,
             values=["0.5", "1", "5", "10", "25", "50"],
+            height=24,
             command=lambda v: self._jog_step_mm.set(float(v)),
         )
         self.step_selector.set("10")
         self.step_selector.pack(side="left", fill="x", expand=True)
 
         pad_frame = ctk.CTkFrame(jog_card, fg_color="transparent")
-        pad_frame.pack(fill="x", padx=10, pady=6)
+        pad_frame.pack(fill="x", padx=8, pady=4)
 
-        # Cruceta X/Y
         xy_grid = ctk.CTkFrame(pad_frame, fg_color="transparent")
-        xy_grid.pack(side="left", padx=(0, 10))
-        ctk.CTkButton(xy_grid, text="Y+", width=64, command=lambda: self._jog(0, 1, 0)).grid(
-            row=0, column=1, padx=2, pady=3
+        xy_grid.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(xy_grid, text="Y+", width=52, height=28, command=lambda: self._jog(0, 1, 0)).grid(
+            row=0, column=1, padx=2, pady=2
         )
-        ctk.CTkButton(xy_grid, text="X-", width=64, command=lambda: self._jog(-1, 0, 0)).grid(
-            row=1, column=0, padx=2, pady=3
+        ctk.CTkButton(xy_grid, text="X-", width=52, height=28, command=lambda: self._jog(-1, 0, 0)).grid(
+            row=1, column=0, padx=2, pady=2
         )
         ctk.CTkButton(
             xy_grid,
             text="Espera",
-            width=64,
+            width=52,
+            height=28,
             fg_color="#475569",
             command=self._on_go_standby,
-        ).grid(row=1, column=1, padx=2, pady=3)
-        ctk.CTkButton(xy_grid, text="X+", width=64, command=lambda: self._jog(1, 0, 0)).grid(
-            row=1, column=2, padx=2, pady=3
+        ).grid(row=1, column=1, padx=2, pady=2)
+        ctk.CTkButton(xy_grid, text="X+", width=52, height=28, command=lambda: self._jog(1, 0, 0)).grid(
+            row=1, column=2, padx=2, pady=2
         )
-        ctk.CTkButton(xy_grid, text="Y-", width=64, command=lambda: self._jog(0, -1, 0)).grid(
-            row=2, column=1, padx=2, pady=3
+        ctk.CTkButton(xy_grid, text="Y-", width=52, height=28, command=lambda: self._jog(0, -1, 0)).grid(
+            row=2, column=1, padx=2, pady=2
         )
 
-        # Columna Z (etiquetas concisas para evitar recorte en cualquier escala DPI)
         z_col = ctk.CTkFrame(pad_frame, fg_color="transparent")
-        z_col.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        z_col.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
-            z_col, text="Z+ Subir", width=116, fg_color="#0f766e", command=lambda: self._jog(0, 0, 1)
-        ).pack(fill="x", pady=3)
+            z_col, text="Z+ Subir", height=28, fg_color="#0f766e", command=lambda: self._jog(0, 0, 1)
+        ).pack(fill="x", pady=2)
         ctk.CTkButton(
-            z_col, text="Z Seguro", width=116, fg_color="#475569", command=self._on_go_safe_z
-        ).pack(fill="x", pady=3)
+            z_col, text="Z Seguro", height=28, fg_color="#475569", command=self._on_go_safe_z
+        ).pack(fill="x", pady=2)
         ctk.CTkButton(
-            z_col, text="Z- Bajar", width=116, fg_color="#0f766e", command=lambda: self._jog(0, 0, -1)
-        ).pack(fill="x", pady=3)
+            z_col, text="Z- Bajar", height=28, fg_color="#0f766e", command=lambda: self._jog(0, 0, -1)
+        ).pack(fill="x", pady=2)
 
-        # ---- 2. Prueba de Movimiento Simultáneo (G0 X Y Z) ----
-        sim_card = ctk.CTkFrame(scroll, corner_radius=8)
-        sim_card.pack(fill="x", padx=4, pady=(0, 8))
+        ctk.CTkButton(
+            jog_card,
+            text="Detener Jog (0x85 / Esc)",
+            height=28,
+            fg_color="#b45309",
+            hover_color="#92400e",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_cancel_jog,
+        ).pack(fill="x", padx=8, pady=(2, 8))
+
+        # ---- 2. Movimiento Simultáneo 3 Ejes (G0 X Y Z) ----
+        sim_card = ctk.CTkFrame(col_left, corner_radius=8)
+        sim_card.pack(fill="x", pady=(0, 6))
 
         ctk.CTkLabel(
             sim_card,
-            text="Movimiento Simultáneo 3 Ejes (G0 X Y Z)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 4))
+            text="Movimiento Simultáneo (G0 X Y Z)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(6, 4))
 
         sim_row = ctk.CTkFrame(sim_card, fg_color="transparent")
-        sim_row.pack(fill="x", padx=10, pady=(2, 8))
+        sim_row.pack(fill="x", padx=8, pady=(0, 6))
 
         ctk.CTkLabel(sim_row, text="X:").pack(side="left")
-        self.ent_sim_x = ctk.CTkEntry(sim_row, width=56)
+        self.ent_sim_x = ctk.CTkEntry(sim_row, width=56, height=26)
         self.ent_sim_x.insert(0, "100.0")
         self.ent_sim_x.pack(side="left", padx=(2, 6))
 
         ctk.CTkLabel(sim_row, text="Y:").pack(side="left")
-        self.ent_sim_y = ctk.CTkEntry(sim_row, width=56)
+        self.ent_sim_y = ctk.CTkEntry(sim_row, width=56, height=26)
         self.ent_sim_y.insert(0, "100.0")
         self.ent_sim_y.pack(side="left", padx=(2, 6))
 
         ctk.CTkLabel(sim_row, text="Z:").pack(side="left")
-        self.ent_sim_z = ctk.CTkEntry(sim_row, width=56)
+        self.ent_sim_z = ctk.CTkEntry(sim_row, width=56, height=26)
         self.ent_sim_z.insert(0, str(self.config_manager.get("motion", "z_safe_mm", default=45.0)))
-        self.ent_sim_z.pack(side="left", padx=(2, 6))
+        self.ent_sim_z.pack(side="left", padx=(2, 4))
 
         ctk.CTkButton(
-            sim_row, text="Mover", width=86, command=self._on_move_simultaneous
-        ).pack(side="right")
+            sim_card, text="Mover (G0)", height=28, command=self._on_move_simultaneous
+        ).pack(fill="x", padx=8, pady=(0, 8))
 
-        # ---- 3. Control de Garra SG90 (Pin D11) ----
-        grip_card = ctk.CTkFrame(scroll, corner_radius=8)
-        grip_card.pack(fill="x", padx=4, pady=(0, 8))
+        # ---- 3. Reloj de Ajedrez ----
+        clock_card = ctk.CTkFrame(col_left, corner_radius=8)
+        clock_card.pack(fill="x", pady=(0, 6))
+
+        ctk.CTkLabel(
+            clock_card,
+            text="Reloj de Ajedrez",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+
+        self.lbl_clock_coords = ctk.CTkLabel(
+            clock_card,
+            text="X=0.0  Y=0.0  Z=0.0 mm",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color="#cbd5e1",
+        )
+        self.lbl_clock_coords.pack(anchor="w", padx=8, pady=(0, 4))
+
+        clock_btns = ctk.CTkFrame(clock_card, fg_color="transparent")
+        clock_btns.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkButton(
+            clock_btns,
+            text="Guardar Reloj",
+            height=28,
+            fg_color="#475569",
+            command=self._on_save_clock_from_current,
+        ).pack(side="left", padx=(0, 3), expand=True, fill="x")
+        ctk.CTkButton(
+            clock_btns,
+            text="Presionar Reloj",
+            height=28,
+            fg_color="#2d7d46",
+            hover_color="#236337",
+            command=self._on_press_clock,
+        ).pack(side="left", padx=(3, 0), expand=True, fill="x")
+
+        # ==================== COLUMNA DERECHA ====================
+        # ---- 4. Control de Garra SG90 (Pin D11) ----
+        grip_card = ctk.CTkFrame(col_right, corner_radius=8)
+        grip_card.pack(fill="x", pady=(0, 6))
 
         grip_header = ctk.CTkFrame(grip_card, fg_color="transparent")
-        grip_header.pack(fill="x", padx=10, pady=(8, 2))
+        grip_header.pack(fill="x", padx=8, pady=(6, 2))
         ctk.CTkLabel(
             grip_header,
-            text="Garra Servo SG90 (Pin D11 — M3 S<valor>)",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            text="Garra SG90 (Pin D11)",
+            font=ctk.CTkFont(size=12, weight="bold"),
         ).pack(side="left")
         self.lbl_gripper_val = ctk.CTkLabel(
             grip_header,
-            text=f"S{self._gripper_pwm_var.get()}",
-            font=ctk.CTkFont(family="Consolas", size=13, weight="bold"),
+            text=f"M3 S{self._gripper_pwm_var.get()}",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color="#38bdf8",
         )
         self.lbl_gripper_val.pack(side="right")
@@ -522,96 +586,66 @@ class ChessRobotApp(ctk.CTk):
             command=self._on_gripper_slider_drag,
         )
         self.slider_gripper.set(self._gripper_pwm_var.get())
-        self.slider_gripper.pack(fill="x", padx=12, pady=4)
+        self.slider_gripper.pack(fill="x", padx=10, pady=4)
 
         grip_btns_1 = ctk.CTkFrame(grip_card, fg_color="transparent")
-        grip_btns_1.pack(fill="x", padx=10, pady=3)
+        grip_btns_1.pack(fill="x", padx=8, pady=2)
         ctk.CTkButton(
-            grip_btns_1, text="Aplicar", command=self._on_send_gripper_slider
+            grip_btns_1, text="Aplicar", height=26, command=self._on_send_gripper_slider
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
-            grip_btns_1, text="Abrir Garra", command=self._on_open_gripper
+            grip_btns_1, text="Abrir", height=26, command=self._on_open_gripper
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
-            grip_btns_1, text="Cerrar Garra", command=self._on_close_gripper
+            grip_btns_1, text="Cerrar", height=26, command=self._on_close_gripper
         ).pack(side="left", padx=2, expand=True, fill="x")
 
         grip_btns_2 = ctk.CTkFrame(grip_card, fg_color="transparent")
-        grip_btns_2.pack(fill="x", padx=10, pady=2)
+        grip_btns_2.pack(fill="x", padx=8, pady=2)
         ctk.CTkButton(
             grip_btns_2,
             text="Probar Garra",
+            height=26,
             fg_color="#0e7490",
             command=self._on_test_gripper,
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
             grip_btns_2,
-            text="Apagar PWM (M5)",
+            text="Apagar (M5)",
+            height=26,
             fg_color="#475569",
             command=lambda: self.robot.disable_gripper_pwm(),
         ).pack(side="left", padx=2, expand=True, fill="x")
 
         grip_btns_3 = ctk.CTkFrame(grip_card, fg_color="transparent")
-        grip_btns_3.pack(fill="x", padx=10, pady=(2, 8))
+        grip_btns_3.pack(fill="x", padx=8, pady=(2, 8))
         ctk.CTkButton(
             grip_btns_3,
             text="Guardar Abierta",
+            height=26,
             fg_color="#334155",
             command=lambda: self._save_gripper_preset("open_pwm"),
         ).pack(side="left", padx=2, expand=True, fill="x")
         ctk.CTkButton(
             grip_btns_3,
             text="Guardar Cerrada",
+            height=26,
             fg_color="#334155",
             command=lambda: self._save_gripper_preset("close_pwm"),
         ).pack(side="left", padx=2, expand=True, fill="x")
 
-        # ---- 4. Reloj de Ajedrez ----
-        clock_card = ctk.CTkFrame(scroll, corner_radius=8)
-        clock_card.pack(fill="x", padx=4, pady=(0, 8))
-
-        ctk.CTkLabel(
-            clock_card,
-            text="Reloj de Ajedrez",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 2))
-
-        self.lbl_clock_coords = ctk.CTkLabel(
-            clock_card,
-            text="Coordenada guardada: X=0.0  Y=0.0  Z=0.0 mm",
-            font=ctk.CTkFont(family="Consolas", size=12),
-            text_color="#cbd5e1",
-        )
-        self.lbl_clock_coords.pack(anchor="w", padx=10, pady=(0, 6))
-
-        clock_btns = ctk.CTkFrame(clock_card, fg_color="transparent")
-        clock_btns.pack(fill="x", padx=10, pady=(0, 8))
-        ctk.CTkButton(
-            clock_btns,
-            text="Guardar Pos. Reloj",
-            fg_color="#475569",
-            command=self._on_save_clock_from_current,
-        ).pack(side="left", padx=(0, 4), expand=True, fill="x")
-        ctk.CTkButton(
-            clock_btns,
-            text="Presionar Reloj",
-            fg_color="#2d7d46",
-            hover_color="#236337",
-            command=self._on_press_clock,
-        ).pack(side="left", padx=(4, 0), expand=True, fill="x")
-
         # ---- 5. Perfiles GRBL ($110-$122) ----
-        preset_card = ctk.CTkFrame(scroll, corner_radius=8)
-        preset_card.pack(fill="x", padx=4, pady=(0, 8))
+        preset_card = ctk.CTkFrame(col_right, corner_radius=8)
+        preset_card.pack(fill="x", pady=(0, 6))
 
         ctk.CTkLabel(
             preset_card,
-            text="Perfiles de Velocidad y Aceleración GRBL ($110–$122)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 4))
+            text="Perfiles GRBL ($110–$122)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(6, 4))
 
         preset_row = ctk.CTkFrame(preset_card, fg_color="transparent")
-        preset_row.pack(fill="x", padx=10, pady=(0, 8))
+        preset_row.pack(fill="x", padx=8, pady=(0, 8))
 
         presets = self.config_manager.get("grbl_presets", "presets", default={})
         self._preset_label_to_key = {
@@ -623,6 +657,7 @@ class ChessRobotApp(ctk.CTk):
         self.preset_combo = ctk.CTkComboBox(
             preset_row,
             state="readonly",
+            height=28,
             values=list(self._preset_label_to_key.keys()) or ["Normal (Partida)"],
         )
         self.preset_combo.set(active_label)
@@ -630,68 +665,35 @@ class ChessRobotApp(ctk.CTk):
 
         ctk.CTkButton(
             preset_row,
-            text="Aplicar Perfil GRBL",
-            width=140,
+            text="Aplicar",
+            width=76,
+            height=28,
             command=self._on_apply_grbl_preset,
         ).pack(side="right")
 
-        # ---- 6. Prueba de Voz (TTS opcional) ----
-        voice_card = ctk.CTkFrame(scroll, corner_radius=8)
-        voice_card.pack(fill="x", padx=4, pady=(0, 8))
-
-        voice_title = (
-            "Síntesis de Voz Offline (Español Argentina)"
-            if self.audio.use_tts
-            else "Síntesis de Voz TTS (Desactivada — Solo Clips MP3)"
-        )
-        ctk.CTkLabel(
-            voice_card,
-            text=voice_title,
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(8, 4))
-
-        voice_row = ctk.CTkFrame(voice_card, fg_color="transparent")
-        voice_row.pack(fill="x", padx=10, pady=(0, 8))
-
-        self.voice_combo = ctk.CTkComboBox(
-            voice_row,
-            state="readonly",
-            values=[label for label, _ in VOICE_TEST_LABELS_ES],
-        )
-        self.voice_combo.set(VOICE_TEST_LABELS_ES[0][0])
-        self.voice_combo.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        ctk.CTkButton(
-            voice_row,
-            text="Probar Voz",
-            width=100,
-            state="normal" if self.audio.use_tts else "disabled",
-            command=self._on_test_voice,
-        ).pack(side="right")
-
-        # ---- 7. Probar Humor y Sonidos ----
-        humor_card = ctk.CTkFrame(scroll, corner_radius=8)
-        humor_card.pack(fill="x", padx=4, pady=(0, 8))
+        # ---- 6. Probar Humor y Sonidos ----
+        humor_card = ctk.CTkFrame(col_right, corner_radius=8)
+        humor_card.pack(fill="x", pady=(0, 6))
 
         humor_hdr = ctk.CTkFrame(humor_card, fg_color="transparent")
-        humor_hdr.pack(fill="x", padx=10, pady=(8, 4))
+        humor_hdr.pack(fill="x", padx=8, pady=(6, 4))
         ctk.CTkLabel(
             humor_hdr,
             text="Probar Humor y Sonidos",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
         ).pack(side="left")
 
         ctk.CTkButton(
             humor_hdr,
-            text="Detener Audio",
-            width=100,
+            text="Detener",
+            width=72,
             height=24,
             fg_color="#475569",
             command=self.audio.stop_clip,
         ).pack(side="right")
 
         humor_btns_1 = ctk.CTkFrame(humor_card, fg_color="transparent")
-        humor_btns_1.pack(fill="x", padx=10, pady=(2, 3))
+        humor_btns_1.pack(fill="x", padx=8, pady=2)
         for label, cat, color in (
             ("Inicio", "inicio", "#0e7490"),
             ("Demora", "demora", "#b45309"),
@@ -700,12 +702,13 @@ class ChessRobotApp(ctk.CTk):
             ctk.CTkButton(
                 humor_btns_1,
                 text=label,
+                height=26,
                 fg_color=color,
                 command=lambda c=cat: self._on_test_humor_category(c),
             ).pack(side="left", padx=2, expand=True, fill="x")
 
         humor_btns_2 = ctk.CTkFrame(humor_card, fg_color="transparent")
-        humor_btns_2.pack(fill="x", padx=10, pady=(2, 6))
+        humor_btns_2.pack(fill="x", padx=8, pady=(2, 4))
         for label, cat, color in (
             ("Jaque", "jaque", "#b91c1c"),
             ("Victoria", "victoria", "#2d7d46"),
@@ -713,6 +716,7 @@ class ChessRobotApp(ctk.CTk):
             ctk.CTkButton(
                 humor_btns_2,
                 text=label,
+                height=26,
                 fg_color=color,
                 command=lambda c=cat: self._on_test_humor_category(c),
             ).pack(side="left", padx=2, expand=True, fill="x")
@@ -720,38 +724,52 @@ class ChessRobotApp(ctk.CTk):
         delay_s = int(round(float(self.config_manager.get("audio", "delay_warning_seconds", default=30))))
         self.sw_humor_timer = ctk.CTkSwitch(
             humor_card,
-            text=f"Activar temporizador de demora ({delay_s}s)",
+            text=f"Temporizador demora ({delay_s}s)",
             variable=self._humor_timer_var,
             command=self._on_toggle_humor_timer,
+            font=ctk.CTkFont(size=11),
         )
-        self.sw_humor_timer.pack(anchor="w", padx=12, pady=(2, 8))
+        self.sw_humor_timer.pack(anchor="w", padx=10, pady=(2, 4))
+
+        audio_mode_txt = (
+            "Audio: Clips MP3 + Voz TTS"
+            if self.audio.use_tts
+            else "Audio: Solo clips MP3 (TTS desactivado)"
+        )
+        ctk.CTkLabel(
+            humor_card,
+            text=audio_mode_txt,
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
 
     def _build_game_tab(self, parent: ctk.CTkFrame) -> None:
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=4, pady=2)
 
         self.lbl_game_status = ctk.CTkLabel(
-            scroll,
+            container,
             text="Turno de las Blancas",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
             fg_color="#1f2937",
             corner_radius=6,
-            height=34,
+            height=30,
         )
-        self.lbl_game_status.pack(fill="x", padx=4, pady=(2, 6))
+        self.lbl_game_status.pack(fill="x", pady=(0, 5))
 
         # Barra superior de partida: Nueva Partida + Jugar contra IA
-        top_game_bar = ctk.CTkFrame(scroll, fg_color="transparent")
-        top_game_bar.pack(fill="x", padx=4, pady=(0, 6))
+        top_game_bar = ctk.CTkFrame(container, fg_color="transparent")
+        top_game_bar.pack(fill="x", pady=(0, 5))
 
         ctk.CTkButton(
             top_game_bar,
             text="Nueva Partida",
-            width=130,
+            width=125,
+            height=28,
             fg_color="#2d7d46",
             hover_color="#236337",
             command=self._on_new_game,
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 10))
 
         self.sw_play_vs_ai = ctk.CTkSwitch(
             top_game_bar,
@@ -763,8 +781,8 @@ class ChessRobotApp(ctk.CTk):
         self.sw_play_vs_ai.pack(side="left", padx=4)
 
         # Tablero interactivo 8x8 clicable (piezas Unicode)
-        board_wrapper = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=8)
-        board_wrapper.pack(pady=(0, 8))
+        board_wrapper = ctk.CTkFrame(container, fg_color="#111827", corner_radius=8)
+        board_wrapper.pack(pady=(0, 6))
 
         canvas_size = self._board_margin_px + 8 * self._board_square_px + 8
         self.board_canvas = tk.Canvas(
@@ -775,29 +793,21 @@ class ChessRobotApp(ctk.CTk):
             highlightthickness=0,
             cursor="hand2",
         )
-        self.board_canvas.pack(padx=6, pady=6)
+        self.board_canvas.pack(padx=5, pady=5)
         self.board_canvas.bind("<Button-1>", self._on_board_click)
 
         # Entrada manual UCI + Detección por cámara
-        move_frame = ctk.CTkFrame(scroll, corner_radius=8)
-        move_frame.pack(fill="x", padx=4, pady=(0, 6))
-
-        ctk.CTkLabel(
-            move_frame,
-            text="Jugada Manual (UCI ej: e2e4) o Visión",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(6, 4))
-
-        row = ctk.CTkFrame(move_frame, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(0, 8))
-        self.ent_manual_move = ctk.CTkEntry(row, placeholder_text="Ej: e2e4")
+        row = ctk.CTkFrame(container, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 2))
+        self.ent_manual_move = ctk.CTkEntry(row, height=28, placeholder_text="Jugada manual (ej: e2e4)")
         self.ent_manual_move.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.ent_manual_move.bind("<Return>", lambda _e: self._on_execute_manual_move())
 
         ctk.CTkButton(
             row,
             text="Mover",
-            width=80,
+            width=76,
+            height=28,
             fg_color="#1f6aa5",
             command=self._on_execute_manual_move,
         ).pack(side="left", padx=(0, 4))
@@ -806,6 +816,7 @@ class ChessRobotApp(ctk.CTk):
             row,
             text="Leer Cámara",
             width=105,
+            height=28,
             fg_color="#0e7490",
             command=self._on_detect_move_from_vision,
         ).pack(side="right")
@@ -815,6 +826,44 @@ class ChessRobotApp(ctk.CTk):
         scroll.pack(fill="both", expand=True)
 
         self._cfg_entries: Dict[str, ctk.CTkEntry] = {}
+
+        # ---- Calibración de Pasos/mm GRBL ($100, $101, $102 EEPROM) ----
+        steps_card = ctk.CTkFrame(scroll, corner_radius=8)
+        steps_card.pack(fill="x", padx=4, pady=(0, 8))
+        ctk.CTkLabel(
+            steps_card,
+            text="Calibración Pasos/mm GRBL (EEPROM: $100, $101, $102)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+
+        steps_row = ctk.CTkFrame(steps_card, fg_color="transparent")
+        steps_row.pack(fill="x", padx=10, pady=(0, 6))
+
+        self._steps_entries: Dict[str, ctk.CTkEntry] = {}
+        for param_key, label in (("$100", "$100 (X):"), ("$101", "$101 (Y):"), ("$102", "$102 (Z):")):
+            ctk.CTkLabel(steps_row, text=label).pack(side="left", padx=(0, 3))
+            ent = ctk.CTkEntry(steps_row, width=78, height=26)
+            ent.pack(side="left", padx=(0, 10))
+            self._steps_entries[param_key] = ent
+
+        steps_btns = ctk.CTkFrame(steps_card, fg_color="transparent")
+        steps_btns.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            steps_btns,
+            text="Leer de GRBL ($$)",
+            height=28,
+            fg_color="#0e7490",
+            hover_color="#0c5f75",
+            command=self._on_read_grbl_steps,
+        ).pack(side="left", padx=(0, 4), expand=True, fill="x")
+        ctk.CTkButton(
+            steps_btns,
+            text="Escribir a EEPROM ($100-$102)",
+            height=28,
+            fg_color="#2d7d46",
+            hover_color="#236337",
+            command=self._on_write_grbl_steps,
+        ).pack(side="left", padx=(4, 0), expand=True, fill="x")
 
         def add_section(title: str, fields: List[Tuple[str, str]]) -> None:
             card = ctk.CTkFrame(scroll, corner_radius=8)
@@ -832,11 +881,12 @@ class ChessRobotApp(ctk.CTk):
                 self._cfg_entries[key] = entry
 
         add_section(
-            "Alturas de Eje Z (mm)",
+            "Alturas de Eje Z y Velocidad Jog",
             [
-                ("z_safe_mm", "Z Seguro de traslado:"),
-                ("z_pick_mm", "Z para tomar pieza:"),
-                ("z_place_mm", "Z para soltar pieza:"),
+                ("z_safe_mm", "Z Seguro de traslado (mm):"),
+                ("z_pick_mm", "Z para tomar pieza (mm):"),
+                ("z_place_mm", "Z para soltar pieza (mm):"),
+                ("default_jog_feed_mm_min", "Velocidad Jog (mm/min):"),
             ],
         )
         add_section(
@@ -976,6 +1026,15 @@ class ChessRobotApp(ctk.CTk):
                 self._render_connection_state(connected, port)
             except queue.Empty:
                 break
+
+        latest_grbl_settings: Optional[Dict[str, float]] = None
+        while True:
+            try:
+                latest_grbl_settings = self._grbl_settings_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest_grbl_settings is not None:
+            self._apply_live_grbl_steps_to_ui(latest_grbl_settings)
 
     def _render_machine_status(self, st: MachineStatus) -> None:
         state_colors = {
@@ -1267,11 +1326,112 @@ class ChessRobotApp(ctk.CTk):
             return False
         return True
 
+    def _bind_jog_hotkeys(self) -> None:
+        """Vincula Escape y soltar teclas de flecha/RePág/AvPág para enviar Jog Cancel (0x85)."""
+        self.bind("<Escape>", self._on_escape_cancel_jog)
+        key_axis_map = {
+            "Left": (-1, 0, 0),
+            "Right": (1, 0, 0),
+            "Up": (0, 1, 0),
+            "Down": (0, -1, 0),
+            "Prior": (0, 0, 1),
+            "Next": (0, 0, -1),
+        }
+        for keysym, (sx, sy, sz) in key_axis_map.items():
+            self.bind(f"<KeyPress-{keysym}>", lambda e, k=keysym, a=(sx, sy, sz): self._on_key_jog_press(e, k, a))
+            self.bind(f"<KeyRelease-{keysym}>", lambda e, k=keysym: self._on_key_jog_release(e, k))
+
+    def _is_text_input_focused(self) -> bool:
+        focused = self.focus_get()
+        if focused is None:
+            return False
+        widget_cls = focused.winfo_class().lower()
+        return widget_cls in ("entry", "tentry", "text")
+
+    def _on_escape_cancel_jog(self, _event: tk.Event) -> None:
+        if self.robot.is_connected:
+            self._active_key_jog = None
+            self.robot.cancel_jog()
+
+    def _on_key_jog_press(self, _event: tk.Event, keysym: str, axes: Tuple[int, int, int]) -> None:
+        if self._is_text_input_focused() or not self.robot.is_connected:
+            return
+        if self._active_key_jog == keysym:
+            return
+        self._active_key_jog = keysym
+        self._jog(*axes)
+
+    def _on_key_jog_release(self, _event: tk.Event, keysym: str) -> None:
+        if self._active_key_jog == keysym:
+            self._active_key_jog = None
+            if self.robot.is_connected:
+                self.robot.cancel_jog()
+
+    def _on_cancel_jog(self) -> None:
+        if not self._require_connected():
+            return
+        self._active_key_jog = None
+        self.robot.cancel_jog()
+
     def _jog(self, sx: int, sy: int, sz: int) -> None:
         if not self._require_connected():
             return
+        # Antirrebote (120 ms) para garantizar exactamente 1 comando por clic
+        now = time.monotonic()
+        if now - self._last_jog_ts < 0.12:
+            return
+        self._last_jog_ts = now
         step = float(self._jog_step_mm.get())
         self.robot.jog_relative(dx=sx * step, dy=sy * step, dz=sz * step)
+
+    def _on_read_grbl_steps(self) -> None:
+        if not self._require_connected():
+            return
+        self._log_to_console("SYS", "Leyendo pasos/mm ($100, $101, $102) desde GRBL ($$)...")
+        self.robot.read_grbl_settings()
+
+    def _on_write_grbl_steps(self) -> None:
+        if not self._require_connected():
+            return
+        try:
+            x_steps = float(self._steps_entries["$100"].get().strip())
+            y_steps = float(self._steps_entries["$101"].get().strip())
+            z_steps = float(self._steps_entries["$102"].get().strip())
+            if x_steps <= 0 or y_steps <= 0 or z_steps <= 0:
+                raise ValueError("Deben ser mayores a cero")
+        except ValueError:
+            messagebox.showerror(
+                "Valores inválidos",
+                "Ingresá valores numéricos positivos para $100, $101 y $102 (ej: 80.000).",
+            )
+            return
+
+        ok, msg = self.robot.write_steps_per_mm(x_steps, y_steps, z_steps)
+        if ok:
+            self.config_manager.set(
+                "motion",
+                "steps_per_mm",
+                value={"$100": x_steps, "$101": y_steps, "$102": z_steps},
+                autosave=True,
+            )
+            self._log_to_console("SYS", msg)
+        else:
+            messagebox.showwarning("EEPROM GRBL", msg)
+
+    def _apply_live_grbl_steps_to_ui(self, settings: Dict[str, float]) -> None:
+        updated = False
+        for key in ("$100", "$101", "$102"):
+            if key in settings and key in self._steps_entries:
+                ent = self._steps_entries[key]
+                ent.delete(0, "end")
+                ent.insert(0, f"{settings[key]:.3f}")
+                updated = True
+        if updated:
+            self._log_to_console(
+                "SYS",
+                "Pasos/mm actualizados desde GRBL: "
+                + ", ".join(f"{k}={settings[k]:.3f}" for k in ("$100", "$101", "$102") if k in settings),
+            )
 
     def _on_go_standby(self) -> None:
         if not self._require_connected():
@@ -1301,7 +1461,7 @@ class ChessRobotApp(ctk.CTk):
     def _on_gripper_slider_drag(self, value: float) -> None:
         val = int(round(value))
         self._gripper_pwm_var.set(val)
-        self.lbl_gripper_val.configure(text=f"S{val}")
+        self.lbl_gripper_val.configure(text=f"M3 S{val}")
 
     def _on_send_gripper_slider(self) -> None:
         if not self._require_connected():
@@ -1686,16 +1846,24 @@ class ChessRobotApp(ctk.CTk):
         corners = cfg["vision"]["calibration"]["machine_corners_mm"]
 
         self.lbl_clock_coords.configure(
-            text=f"Coordenada guardada: X={clock['x']:.1f}  Y={clock['y']:.1f}  Z={clock['z_press']:.1f} mm"
+            text=f"X={clock['x']:.1f}  Y={clock['y']:.1f}  Z={clock['z_press']:.1f} mm"
         )
         delay_s = int(round(float(audio_cfg.get("delay_warning_seconds", 30))))
         if hasattr(self, "sw_humor_timer"):
-            self.sw_humor_timer.configure(text=f"Activar temporizador de demora ({delay_s}s)")
+            self.sw_humor_timer.configure(text=f"Temporizador demora ({delay_s}s)")
+
+        steps_cfg = motion.get("steps_per_mm", {"$100": 80.0, "$101": 80.0, "$102": 400.0})
+        for key in ("$100", "$101", "$102"):
+            ent = self._steps_entries.get(key)
+            if ent is not None:
+                ent.delete(0, "end")
+                ent.insert(0, f"{float(steps_cfg.get(key, 80.0)):.3f}")
 
         values = {
             "z_safe_mm": motion["z_safe_mm"],
             "z_pick_mm": motion["z_pick_mm"],
             "z_place_mm": motion["z_place_mm"],
+            "default_jog_feed_mm_min": motion.get("default_jog_feed_mm_min", 1200.0),
             "standby_x": motion["standby_position"]["x"],
             "standby_y": motion["standby_position"]["y"],
             "standby_z": motion["standby_position"]["z"],
@@ -1732,6 +1900,7 @@ class ChessRobotApp(ctk.CTk):
         cm.set("motion", "z_safe_mm", value=vals["z_safe_mm"], autosave=False)
         cm.set("motion", "z_pick_mm", value=vals["z_pick_mm"], autosave=False)
         cm.set("motion", "z_place_mm", value=vals["z_place_mm"], autosave=False)
+        cm.set("motion", "default_jog_feed_mm_min", value=max(100.0, vals["default_jog_feed_mm_min"]), autosave=False)
         cm.set(
             "motion",
             "standby_position",
